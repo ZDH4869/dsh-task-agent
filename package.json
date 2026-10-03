@@ -46,6 +46,7 @@
     "icon.svg",
     "locale/*.json",
     "README.md",
+    "AGENT-INSTALL.md",
     "LICENSE"
   ],
   "scripts": {
