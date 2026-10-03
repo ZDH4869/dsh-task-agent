@@ -1,0 +1,6 @@
+{
+  "task-agent-kit": {
+    "title": "Task Agent Kit",
+    "description": "Turns each role folder under the configured source-agent path into a selectable Agent: its Agent.md becomes the session persona, its .skills/ is mounted, and its MCP servers are connected."
+  }
+}

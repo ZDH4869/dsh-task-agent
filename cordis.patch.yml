@@ -1,0 +1,34 @@
+# Task Agent Kit — bundle patch.
+#
+# One row only: the plugin itself. Everything version-sensitive lives in optional files
+# beside this one (see `cordis.team.patch.yml`), so installing this bundle cannot break a
+# deployment whose harness does not ship the experimental Agent Teams packages.
+#
+# The values below are DEFAULTS. Put your own into the profile's `cordis.patch.yml`
+# (the user layer wins), which is also what the Settings page writes:
+#
+#   - id: task-agent-kit
+#     name: 'dsh-task-agent-kit'
+#     config:
+#       sourceAgentPath: 'D:\DSH_desktop\Agents'
+#       sharedRoots: ['D:\DSH_desktop\common_project']
+#
+- insert:
+    - id: task-agent-kit
+      name: 'dsh-task-agent-kit'
+      config:
+        sourceAgentPath: ''
+        basePresetId: ''
+        skillDirCandidates: ['.skills', '.agents/skills', 'skills']
+        rolePromptCandidates: ['Agent.md', 'AGENTS.md', 'CLAUDE.md']
+        mcpFileCandidates: ['mcp.json', '.mcp.json', '.mcp/mcp.json', '.mcp/servers.json', 'mcp.yml', 'mcp.yaml']
+        presetIdPrefix: taskagent
+        allowEmptyPrompt: false
+        pruneStaleRoles: true
+        allowOverwrite: false
+        roleTemplateDir: ''
+        statusFile: ''
+        # Resource roots every role shares. Their `.skills` directories join EVERY role
+        # preset's `customSkillDirs` and their `.mcp/mcp.json` servers are merged into every
+        # role preset, so one deployment reaches every agent — including future ones.
+        sharedRoots: []

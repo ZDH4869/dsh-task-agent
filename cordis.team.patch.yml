@@ -1,0 +1,60 @@
+# OPTIONAL — Agent Teams layer (multi-tier delegation).
+#
+# This file is NOT read by the installer: `install_bundle` loads `cordis.patch.yml` only.
+# Append the block below to your PROFILE's `cordis.patch.yml` (`profiles/<profile>/cordis.patch.yml`)
+# when you want the delegation layer that the tier tree depends on.
+#
+# What it does:
+#   1. disables the four legacy subagent control/tool rows, so the Team tools replace them;
+#   2. inserts `agent-team` (roster + mailbox + task board), `tool-agent-team`
+#      (`spawn_teammate`, `send_message`, `team_task_*`, …) and `ui-agent-team` (the
+#      「智能体团队」 chip in the conversation header).
+#
+# WHY IT IS OPTIONAL AND WHAT TO CHECK AFTER A HARNESS UPGRADE:
+#   It names row ids and packages of the `@deepseek-ai/dsh-experimental-*` family. A harness
+#   upgrade can rename or drop them. Verify before relying on it:
+#
+#     # 1. are the packages still shipped?
+#     node -e "for (const p of ['dsh-experimental-agent-team','dsh-experimental-tool-agent-team','dsh-experimental-client-ui-agent-team']) { try { require.resolve('@deepseek-ai/'+p+'/package.json'); console.log('ok  ',p) } catch { console.log('MISSING',p) } }"
+#
+#     # 2. does the composed profile carry the rows?
+#     node "<dsh>/lib/bin.js" --profile <profile> --dump-config | findstr /C:"id: agent-team" /C:"id: tool-agent-team"
+#
+#   `install/verify-cascade.ps1` automates both checks on Windows.
+#
+# Do NOT also enable `@deepseek-ai/dsh-experimental-agent-team-profile`: that bundle inserts
+# the same row ids and the duplicate insert is rejected at boot.
+#
+# Platform note: the experimental team packages ship with a specific harness line. If a
+# future harness ships its own multi-tier delegation, drop this file instead of patching.
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- insert:
+    - id: agent-team
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+      config:
+        maxMembers: 8
+        maxTasks: 256
+        maxPendingMessagesPerMember: 64
+        maxMessageBytes: 65536
+        disposalTimeoutMs: 5000
+
+    - id: tool-agent-team
+      name: '@deepseek-ai/dsh-experimental-tool-agent-team'
+      config:
+        freshProvider: spawn
+        forkProvider: fork
+
+    - id: ui-agent-team
+      name: '@deepseek-ai/dsh-experimental-client-ui-agent-team'
