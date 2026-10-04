@@ -162,8 +162,16 @@ test('apply exposes the scaffolding tool and registers the role it creates', asy
     const { ctx, tools, registered, cleanups } = stubContext();
     await apply(ctx, { sourceAgentPath: root, presetIdPrefix: 'taskagent' });
 
-    assert.deepEqual(tools.map(tool => tool.name), ['create_task_agent_role']);
-    const tool = tools[0];
+    // The scaffolding tool plus the five task-record tools the delegated agents use.
+    assert.deepEqual(tools.map(tool => tool.name), [
+      'create_task_agent_role',
+      'register_task_participation',
+      'record_delivery',
+      'record_acceptance',
+      'write_context_memory',
+      'read_task_context',
+    ]);
+    const tool = tools.find(entry => entry.name === 'create_task_agent_role');
     assert.ok(tool.parameters.role_name.required, 'role_name is required');
     assert.equal(typeof tool.execute, 'function');
     // `defineTool` reads `output.render` and validates `output.schema`; a tool shipped

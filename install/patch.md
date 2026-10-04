@@ -95,3 +95,33 @@
 ## 回滚
 
 `restore-cascade.ps1` 从 `.bak-*` 还原 `index.js`；或在未还原的情况下把 `DSH_AGENT_TEAM_CASCADE` 置为 `0`。
+
+### P6 同级消息的信箱路由（与 P3 合并实现）
+
+原生（含 P1–P5）：每个成员是**自己团队**的 root，其 roster 只含**自己的孩子**；**同级彼此不在对方名册里**，
+因此 A 给同级 B 发消息会抛 `active teammate "B" not found`。**但同级直连是产品要求（Q7 必须）。**
+
+补丁：在 `TeamMailbox.sendAdmitted` 里把已有的"跨团队路由"从**仅向上**推广到**同级**，三种形态统一处理：
+
+| 目标 | 解析方式 | 消息写入 |
+|---|---|---|
+| `"lead"` | 直接上级（P2 的 `resolveLeadSelf`） | **上级自己的日志**（P3 原有行为） |
+| 不在**我的**名册、但在**上级**名册里的名字 | 上级名册里的同名活跃成员 = 我的**同级** | **该同级自己的日志**（`targetId` = 它自己 id） |
+| 其他（我的孩子 / 独立团队） | `resolveActiveMember(root, state, name)` | 不变（原生单团队语义） |
+
+**为什么必须写进接收方自己的日志**：派发/认领走 `recoverFor`，它只扫**该成员自己 root** 的日志。
+写进调用者日志会让消息永久滞留、无人认领（与 P3 同一原因）。
+
+**同级双方名册互不可见**（P1 的必然结果），因此：
+- 目标解析借道**上级名册**（它知道全部孩子）；
+- 发送者名字也从**上级名册**取真名并写入 `membership.name`——否则 P5 的回退会让消息署名 "lead"，
+  收件人无法知道是谁发的（这是 P6 里最容易漏的一处）。
+
+**未改动的部分**：`journal.transact/appendAndFlush`、`tryDispatch`、`TeamTaskBoard`、投影——全部以
+`root`（此处=接收方）为准，自动落在接收方的团队日志里。
+
+### 已知遗留（不影响功能）
+
+- `apply-cascade.ps1` 的 P3 锚点会**重复插入一行注释**（`/** Queue and dispatch … */` 出现两次）。
+  这是 patch.md 已记录的"锚点块未覆盖到替换块之后下一行"的历史遗留，**纯注释、无行为影响**，本轮未改动以免重新推导锚点。
+- `verify-cascade.ps1` 的期望模式已随 P6 同步（`upwardTarget` → `routedTarget`）。

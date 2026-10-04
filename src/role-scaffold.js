@@ -87,6 +87,7 @@ export async function createRoleSkeleton(options) {
     templateDir = '',
     overwrite = false,
     dryRun = false,
+    mountShared = true,
   } = options ?? {};
 
   if (typeof rootPath !== 'string' || rootPath.trim().length === 0) {
@@ -128,6 +129,9 @@ export async function createRoleSkeleton(options) {
     displayName: name,
     description: description || `${name}（第 ${tierNumber} 层）`,
     tier: tierNumber,
+    // Whether this expert receives the shared resource roots. Recorded per role so the Host
+    // can honour it while composing the preset (the scan reads it back from this file).
+    mountShared,
   };
 
   const planned = [

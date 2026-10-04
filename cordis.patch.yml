@@ -1,34 +1,49 @@
-# Task Agent Kit — bundle patch.
-#
-# One row only: the plugin itself. Everything version-sensitive lives in optional files
-# beside this one (see `cordis.team.patch.yml`), so installing this bundle cannot break a
-# deployment whose harness does not ship the experimental Agent Teams packages.
-#
-# The values below are DEFAULTS. Put your own into the profile's `cordis.patch.yml`
-# (the user layer wins), which is also what the Settings page writes:
-#
-#   - id: task-agent-kit
-#     name: 'dsh-task-agent-kit'
-#     config:
-#       sourceAgentPath: 'D:\DSH_desktop\Agents'
-#       sharedRoots: ['D:\DSH_desktop\common_project']
-#
 - insert:
     - id: task-agent-kit
-      name: 'dsh-task-agent-kit'
+      name: '@local/dsh-task-agent-kit'
       config:
         sourceAgentPath: ''
         basePresetId: ''
         skillDirCandidates: ['.skills', '.agents/skills', 'skills']
-        rolePromptCandidates: ['Agent.md', 'AGENTS.md', 'CLAUDE.md']
-        mcpFileCandidates: ['mcp.json', '.mcp.json', '.mcp/mcp.json', '.mcp/servers.json', 'mcp.yml', 'mcp.yaml']
-        presetIdPrefix: taskagent
-        allowEmptyPrompt: false
-        pruneStaleRoles: true
-        allowOverwrite: false
-        roleTemplateDir: ''
-        statusFile: ''
-        # Resource roots every role shares. Their `.skills` directories join EVERY role
-        # preset's `customSkillDirs` and their `.mcp/mcp.json` servers are merged into every
-        # role preset, so one deployment reaches every agent — including future ones.
-        sharedRoots: []
+
+# Agent Teams, carried by THIS installed bundle.
+#
+# `@deepseek-ai/dsh-experimental-agent-team-profile` is an optional shipped bundle: the
+# profile maintenance pass drops it from the manifest again on the next launch (observed
+# twice), which silently reverts the whole deployment to the legacy subagent controls —
+# `spawn_teammate` disappears, `team_task_*` disappears, and `maxDepth` pins the tree at
+# one level. This bundle IS installed and survives restarts, so its layer carries the same
+# replacements, which is the documented way to enable a shipped plugin durably.
+#
+# Do NOT also enable the team profile bundle: the two layers would insert the same row ids.
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- insert:
+    - id: agent-team
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+      config:
+        maxMembers: 8
+        maxTasks: 256
+        maxPendingMessagesPerMember: 64
+        maxMessageBytes: 65536
+        disposalTimeoutMs: 5000
+
+    - id: tool-agent-team
+      name: '@deepseek-ai/dsh-experimental-tool-agent-team'
+      config:
+        freshProvider: spawn
+        forkProvider: fork
+
+    - id: ui-agent-team
+      name: '@deepseek-ai/dsh-experimental-client-ui-agent-team'
+

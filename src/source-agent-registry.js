@@ -195,6 +195,9 @@ export async function scanRole(rolePath) {
     mcpServers,
     displayName: agent?.displayName ?? roleId,
     description: agent?.description ?? firstParagraph(promptText),
+    // A role opts out of the shared roots with `mountShared: false`; absent means opt in,
+    // which keeps every hand-made folder on the default (shared resources are available).
+    mountShared: agent?.mountShared !== false,
     diagnostics: [
       ...(prompt === undefined ? ['missing role prompt (Agent.md / AGENTS.md / CLAUDE.md)'] : []),
       ...(agent?.mcpError === undefined ? [] : [`MCP config ignored: ${agent.mcpError}`]),
@@ -238,20 +241,51 @@ export async function scanSourceRoot(rootPath) {
     .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
   const roles = [];
   const skipped = [];
-  for (const dir of directories) {
+
+  /**
+   * Consider one candidate folder as a role.
+   *
+   * `prefix` is set for a nested candidate (`<一级文件夹>\<专家>`, the home the "create an
+   * expert" form can target): its id is namespaced by the parent so two experts with the
+   * same folder name under different parents stay distinct. Depth-2 candidates that carry no
+   * role marker are silently ignored — a role folder's own `log`, `markdown` and
+   * `open_project` are not interesting enough to report.
+   */
+  const consider = async (dir, prefix, report) => {
     let role;
     try {
       role = await scanRole(dir);
     } catch (error) {
-      skipped.push({ path: dir, reason: `scan failed: ${String(error?.message ?? error)}` });
-      continue;
+      if (report) skipped.push({ path: dir, reason: `scan failed: ${String(error?.message ?? error)}` });
+      return false;
     }
     // `agent.json` may promote a folder explicitly when its prompt lives elsewhere.
     if (role.promptPath === undefined && role.hasAgentJson !== true) {
-      skipped.push({ path: dir, reason: 'no role marker (Agent.md / AGENTS.md / CLAUDE.md / agent.json)' });
-      continue;
+      if (report) skipped.push({ path: dir, reason: 'no role marker (Agent.md / AGENTS.md / CLAUDE.md / agent.json)' });
+      return false;
+    }
+    if (prefix !== undefined) {
+      role.roleId = `${prefix}-${role.roleId}`;
+      role.presetId = presetIdForRole(role.roleId);
     }
     roles.push(role);
+    return true;
+  };
+
+  for (const dir of directories) {
+    await consider(dir, undefined, true);
+    // Always look one level deeper, including inside a role folder: that is where the
+    // "create an expert" form puts a new expert when the user names a home for it.
+    let subs = [];
+    try {
+      subs = (await readdir(dir, { withFileTypes: true }))
+        .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+        .map(entry => join(dir, entry.name))
+        .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    } catch {
+      subs = [];
+    }
+    for (const sub of subs) await consider(sub, basename(dir), false);
   }
   return { root, roles, skipped };
 }

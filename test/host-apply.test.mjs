@@ -83,11 +83,164 @@ async function fixture() {
   return root;
 }
 
+/**
+ * `apply()` now activates immediately and runs the roster scan once the Loader tree settles —
+ * that deferral is what keeps boot fast — so a test must let that deferred work finish before
+ * reading anything the scan produced (presets, status file, log lines).
+ */
+async function settled(ms = 150) {
+  await new Promise(resolve => setTimeout(resolve, ms));
+}
+test('apply never waits for a settings write (boot deadlock guard)', async () => {
+  const root = await fixture();
+  try {
+    const { ctx } = stubContext();
+    // A settings write is reconciled through the Loader, and during boot the Loader is still
+    // waiting for THIS apply() to settle. Awaiting the write inside apply() therefore
+    // deadlocks the whole boot — observed in the field as
+    // `[loader] plugin initialization timed out after 100s` with DSH stuck on its splash.
+    // Both the write and the Loader are made never to settle, so ANY awaited write inside
+    // apply() would hang here and fail instead of booting the app into a deadlock.
+    const never = () => new Promise(() => {});
+    ctx.get = name => (name === 'settings' ? { update: never } : undefined);
+    ctx.root = { loader: { await: never } };
+
+    const outcome = await Promise.race([
+      apply(ctx, { sourceAgentPath: root, presetIdPrefix: 'taskagent' }).then(() => 'settled'),
+      new Promise(resolve => setTimeout(() => resolve('hung'), 1500)),
+    ]);
+    assert.equal(outcome, 'settled', 'apply() must resolve without awaiting the settings write');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the host publishes each expert task history for the observer room', async () => {
+  const root = await fixture();
+  try {
+    // One task record for the role, in the documented layout.
+    await mkdir(join(root, 'Backend Dev', 'log', '_tasks', '登录重构'), { recursive: true });
+    await writeFile(join(root, 'Backend Dev', 'log', '_tasks', '登录重构', 'task.json'), JSON.stringify({
+      taskName: '登录重构',
+      tier: 2,
+      deliverable: 'docs\\login.md',
+      acceptance: { status: 'passed' },
+      updatedAt: '2026-10-04T00:00:00.000Z',
+    }), 'utf8');
+
+    const { ctx } = stubContext();
+    const patches = [];
+    ctx.get = name => (name === 'settings' ? { update: async (_ns, patch) => patches.push(patch) } : undefined);
+    ctx.root = { loader: { await: async () => {} } };
+
+    await apply(ctx, { sourceAgentPath: root, presetIdPrefix: 'taskagent' });
+    await settled();
+    // The publication is deliberately deferred until the Loader settles (see the deadlock
+    // guard), so give the deferred task a moment to run.
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const published = patches.find(patch => patch.expertTasks !== undefined);
+    assert.ok(published !== undefined, `expertTasks must be published; got ${JSON.stringify(patches)}`);
+    const tasks = JSON.parse(published.expertTasks)['taskagent-backend-dev'];
+    assert.equal(tasks.length, 1, 'the one recorded task is published');
+    assert.equal(tasks[0].name, '登录重构');
+    assert.equal(tasks[0].tier, 2, 'the tier the expert held is carried through');
+    assert.equal(tasks[0].status, 'passed', 'the acceptance status is carried through');
+    assert.equal(tasks[0].deliverable, 'docs\\login.md');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('apply survives a service that throws on property access (Cordis inject)', async () => {
+  const root = await fixture();
+  try {
+    const { ctx } = stubContext();
+    // Cordis THROWS on reading a property whose service is not in the plugin's `inject` list:
+    // `cannot get property "systemPrompt" without inject`. Modeling exactly that catches the
+    // class of bug that failed a real boot — an optional-looking `ctx.service?.method` still
+    // throws, because it is the ACCESS that fails, not the call.
+    let hook;
+    Object.defineProperty(ctx, 'systemPrompt', {
+      configurable: true,
+      get() {
+        throw new Error('cannot get property "systemPrompt" without inject');
+      },
+    });
+    // The supported optional path still finds it and registers the injection.
+    ctx.get = name => (name === 'systemPrompt'
+      ? { context: configuration => { hook = configuration; return () => {}; } }
+      : undefined);
+    ctx.root = { loader: { await: async () => {} } };
+
+    await apply(ctx, { sourceAgentPath: root, presetIdPrefix: 'taskagent' });
+    await settled();
+    assert.ok(hook !== undefined, 'the injection is registered through the optional lookup');
+    assert.equal(hook.name, 'task-agent:expert-memory');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the host injects a task session\'s newest memories before each model step', async () => {
+  const root = await fixture();
+  try {
+    const taskDir = join(root, 'Backend Dev', 'log', '_tasks', '登录重构');
+    await mkdir(taskDir, { recursive: true });
+    await writeFile(join(taskDir, 'task.json'), JSON.stringify({
+      taskName: '登录重构', tier: 2, sessionId: 'session-task-1',
+    }), 'utf8');
+    await writeFile(join(taskDir, 'context.md'),
+      '# 上下文记忆\n\n## 记忆条目\n\n'
+      + '### 2026-10-01T00:00:00.000Z　[agent]\n\n第 1 条记忆\n\n'
+      + '### 2026-10-02T00:00:00.000Z　[agent]\n\n第 2 条记忆\n\n'
+      + '### 2026-10-03T00:00:00.000Z　[agent]\n\n第 3 条记忆\n\n'
+      + '### 2026-10-04T00:00:00.000Z　[agent]\n\n第 4 条记忆\n\n'
+      + '### 2026-10-05T00:00:00.000Z　[agent]\n\n第 5 条记忆\n',
+      'utf8');
+
+    const { ctx } = stubContext();
+    let hook;
+    // Exposed through the optional lookup the plugin actually uses (`ctx.get`), never as a
+    // hard-injected property.
+    ctx.get = name => (name === 'systemPrompt'
+      ? {
+        context: configuration => {
+          hook = configuration;
+          return () => {};
+        },
+      }
+      : undefined);
+    ctx.root = { loader: { await: async () => {} } };
+
+    await apply(ctx, { sourceAgentPath: root, presetIdPrefix: 'taskagent' });
+    await settled();
+
+    assert.ok(hook !== undefined, 'the memory context must be registered');
+    assert.equal(hook.name, 'task-agent:expert-memory');
+    assert.equal(hook.order, 130, 'after sandbox(110), approval(115) and delegation(120)');
+    // Nothing is injected for an unrelated session, and an unknown assembly shape is inert.
+    assert.equal(hook.text({ agent: { id: 'someone-else' } }), '');
+    assert.equal(hook.text({}), '', 'a missing agent must yield an empty injection, never throw');
+
+    // The cache is filled off the assembly path (deferred until the Loader settles).
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const injected = hook.text({ agent: { id: 'session-task-1' } });
+    assert.match(injected, /本任务既有记忆/u);
+    assert.match(injected, /第 5 条记忆/u);
+    assert.ok(!injected.includes('第 2 条记忆'), 'only the newest three entries are injected');
+    assert.ok(!injected.includes('第 1 条记忆'), 'only the newest three entries are injected');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('apply registers one preset per role, cloning the shipped base template', async () => {
   const root = await fixture();
   try {
     const { ctx, registered, logs, effects, cleanups } = stubContext();
     await apply(ctx, { sourceAgentPath: root, presetIdPrefix: 'taskagent' });
+    await settled();
 
     assert.equal(registered.length, 1, `expected only the marked non-empty role, got ${registered.map(r => r.id).join(',')}`);
     const preset = registered[0];
@@ -115,8 +268,11 @@ test('apply registers one preset per role, cloning the shipped base template', a
       logs.some(line => line.includes('registered 1 role preset') && line.includes('skipped 1 folder')),
       `logs: ${logs.join(' | ')}`,
     );
-    assert.equal(effects.length, 2, 'a settings subscription plus the registration disposer');
-    assert.equal(cleanups.length, 2, 'both effects must hand back a cleanup');
+    // Settings subscription + the memory-cache interval + the final disposer. The
+    // systemPrompt registration and the tool rows are absent here because this stub exposes
+    // neither service.
+    assert.equal(effects.length, 3, 'a settings subscription, the memory interval and the disposer');
+    assert.equal(cleanups.length, 3, 'every effect must hand back a cleanup');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -135,6 +291,7 @@ test('apply warns when the live base preset has rows the template lacks', async 
     }];
     const { ctx, logs } = stubContext({ inventory });
     await apply(ctx, { sourceAgentPath: root });
+    await settled();
     assert.ok(
       logs.some(line => line.startsWith('warn:') && line.includes('base preset drift') && line.includes('dsh-tool-brand-new')),
       `logs: ${logs.join(' | ')}`,
@@ -149,10 +306,12 @@ test('apply skips roles with an empty prompt by default and can allow them', asy
   try {
     const first = stubContext();
     await apply(first.ctx, { sourceAgentPath: root });
+    await settled();
     assert.deepEqual(first.registered.map(row => row.id), ['taskagent-backend-dev'], 'empty-prompt role skipped');
 
     const second = stubContext();
     await apply(second.ctx, { sourceAgentPath: root, allowEmptyPrompt: true });
+    await settled();
     assert.deepEqual(second.registered.map(row => row.id).sort(), ['taskagent-backend-dev', 'taskagent-empty-role']);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -162,11 +321,13 @@ test('apply skips roles with an empty prompt by default and can allow them', asy
 test('apply tolerates an unconfigured or unreadable path without throwing', async () => {
   const empty = stubContext();
   await apply(empty.ctx, { sourceAgentPath: '' });
+  await settled();
   assert.equal(empty.registered.length, 0);
   assert.ok(empty.logs.some(line => line.includes('not configured')), `logs: ${empty.logs.join(' | ')}`);
 
   const broken = stubContext();
   await apply(broken.ctx, { sourceAgentPath: 'D:\\this\\path\\does\\not\\exist\\task-agent-kit' });
+  await settled();
   assert.equal(broken.registered.length, 0);
   assert.ok(broken.logs.some(line => line.startsWith('warn:')), `logs: ${broken.logs.join(' | ')}`);
 });
@@ -176,6 +337,7 @@ test('apply reports an unknown base preset through the logger instead of throwin
   try {
     const { ctx, registered, logs } = stubContext();
     await apply(ctx, { sourceAgentPath: root, basePresetId: 'no-such-preset' });
+    await settled();
     assert.equal(registered.length, 0);
     assert.ok(logs.some(line => line.startsWith('warn:') && line.includes('initial scan failed')), `logs: ${logs.join(' | ')}`);
   } finally {
@@ -188,6 +350,7 @@ test('disposing the plugin unregisters every preset it registered', async () => 
   try {
     const { ctx, registered, disposed, cleanups } = stubContext();
     await apply(ctx, { sourceAgentPath: root });
+    await settled();
     assert.equal(registered.length, 1);
     for (const cleanup of cleanups) await cleanup();
     assert.deepEqual(disposed, registered.map(row => row.id));
@@ -205,6 +368,7 @@ test('the shipped template carries no drift against a live base preset built fro
   try {
     const { ctx, logs } = stubContext();
     await apply(ctx, { sourceAgentPath: root });
+    await settled();
     const driftLines = logs.filter(line => line.includes('drift'));
     assert.deepEqual(driftLines, [], `unexpected drift: ${driftLines.join(' | ')}`);
 
@@ -235,6 +399,7 @@ test('a configured status file records the scan outcome', async () => {
   try {
     const { ctx } = stubContext();
     await apply(ctx, { sourceAgentPath: root, statusFile });
+    await settled();
     const payload = JSON.parse(await readFile(statusFile, 'utf8'));
     assert.equal(payload.sourceAgentPath, root);
     assert.equal(payload.basePreset, TEMPLATE.sourcePreset);
@@ -256,6 +421,7 @@ test('failures are reported at warning level so they reach the harness log', asy
   try {
     const { ctx, logs } = stubContext();
     await apply(ctx, { sourceAgentPath: root });
+    await settled();
     assert.ok(
       logs.some(line => line.startsWith('warn:') && line.includes('role(s) failed') && line.includes('Empty Role')),
       `logs: ${logs.join(' | ')}`,
@@ -273,6 +439,7 @@ test('a preset that register() accepted but that failed to mount is reported as 
   try {
     const { ctx, registered, logs } = stubContext({ roleBroken: ['taskagent-backend-dev'] });
     await apply(ctx, { sourceAgentPath: root });
+    await settled();
     assert.equal(registered.length, 1, 'register() was still called');
     assert.ok(
       logs.some(line => line.startsWith('warn:') && line.includes('did not activate') && line.includes('mount exploded')),
@@ -290,6 +457,7 @@ test('an id that is already registered is reused instead of colliding', async ()
   try {
     const { ctx, registered, logs } = stubContext({ existingPresets: [{ id: 'taskagent-backend-dev', name: 'Backend Dev' }] });
     await apply(ctx, { sourceAgentPath: root });
+    await settled();
     assert.equal(registered.length, 0, 'must not re-register an id that is already live');
     assert.ok(
       logs.some(line => line.includes('reused 1 already-registered preset')),
@@ -305,6 +473,7 @@ test('registering nothing is a warning, never a silent success', async () => {
   try {
     const { ctx, logs } = stubContext();
     await apply(ctx, { sourceAgentPath: empty });
+    await settled();
     assert.ok(
       logs.some(line => line.startsWith('warn:') && line.includes('no role preset was registered')),
       `logs: ${logs.join(' | ')}`,
@@ -323,6 +492,7 @@ test('a volatile path arrives as a live ref and is read through get()', async ()
   try {
     const { ctx, registered } = stubContext();
     await apply(ctx, { sourceAgentPath: { get: () => root }, statusFile });
+    await settled();
     assert.deepEqual(registered.map(entry => entry.id), ['taskagent-backend-dev']);
 
     // The status artifact must carry the RESOLVED path: serializing the raw volatile
@@ -345,6 +515,7 @@ test('a settings edit triggers a re-scan without a remount', async () => {
     let current = first;
     const { ctx, registered, disposed, subscriptions, logs } = stubContext();
     await apply(ctx, { sourceAgentPath: { get: () => current } });
+    await settled();
     assert.deepEqual(registered.map(entry => entry.id), ['taskagent-backend-dev']);
 
     const subscription = subscriptions.find(item => item.name === 'settings/document-updated');
@@ -366,5 +537,20 @@ test('a settings edit triggers a re-scan without a remount', async () => {
   } finally {
     await rm(first, { recursive: true, force: true });
     await rm(second, { recursive: true, force: true });
+  }
+});
+
+test('apply() settles even when the loader never does, so activation is not blocked by the scan', async () => {
+  const root = await fixture();
+  try {
+    const { ctx } = stubContext();
+    // The deferred pipeline never runs here. If apply() still awaited the roster scan (or any
+    // settings publication) this test would hang — which is exactly the boot hang that showed up
+    // as "[loader] still waiting for 1 plugin entries ... @local/dsh-task-agent-kit".
+    ctx.root = { loader: { await: () => new Promise(() => {}) } };
+    await apply(ctx, { sourceAgentPath: root, presetIdPrefix: 'taskagent' });
+    assert.ok(true, 'apply resolved with the scan still pending');
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

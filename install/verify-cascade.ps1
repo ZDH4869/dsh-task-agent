@@ -41,7 +41,7 @@ $needles = @(
     'function resolveLeadSelf(root)',
     'id: resolveLeadSelf(root)',
     'request.target.trim() === "lead"',
-    'upwardTarget === void 0 ? resolveActiveMember',
+    'routedTarget === void 0 ? resolveActiveMember',
     'senderName: state.members.find((member) => member.id === caller.id)?.name',
     'root.id !== caller.id'
 )

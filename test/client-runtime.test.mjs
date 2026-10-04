@@ -157,7 +157,7 @@ test('the factory resolves React from the module table and returns apply + injec
   assert.equal(typeof mod.apply, 'function');
   // `remote` must be declared alongside its namespaces: reading `ctx.remote` without
   // it throws `cannot get property "remote" without inject`.
-  assert.deepEqual(mod.inject.slice().sort(), ['layout', 'remote', 'remote.agentPresets', 'remote.session', 'configForms', 'slots', 'uiWorkspace'].sort());
+  assert.deepEqual(mod.inject.slice().sort(), ['layout', 'remote', 'remote.agentPresets', 'remote.session', 'remote.workspace', 'configForms', 'slots', 'uiWorkspace'].sort());
 });
 
 test('apply claims every declared cell without throwing', () => {
@@ -167,13 +167,17 @@ test('apply claims every declared cell without throwing', () => {
 
   assert.deepEqual(injected.slice().sort(), [
     'conversation.hero.modeActions',
+    // Two session-header cells: the tier-plan chip and the expert-page binder.
+    'conversation.session.header.utilities',
     'conversation.session.header.utilities',
     'main',
+    // Two Config rows share the footer: the source-agent path and the shared-resource path.
+    'settings.models.footer',
     'settings.models.footer',
     'shell.overlay',
     'sidebar.panellist',
   ]);
-  assert.equal(registered.length, 6, 'one cell per declared slot');
+  assert.equal(registered.length, 8, 'one cell per declared row');
 
   const byName = new Map(registered.map(entry => [entry.options.name, entry.options]));
   assert.equal(byName.get('main').key, 'agentDeck', 'the panel must use its own main key');
@@ -186,7 +190,12 @@ test('apply claims every declared cell without throwing', () => {
   // `conversation.hero.dock` only renders while the Conversation has no session, so the
   // picker is a frame-wide overlay instead.
   assert.equal(byName.get('shell.overlay').id, 'task-agent-plan-panel');
-  assert.equal(byName.get('settings.models.footer').id, 'task-agent-source-path');
+  // The footer carries two Config rows; both must be registered with their own ids.
+  assert.deepEqual(
+    registered.filter(entry => entry.options.name === 'settings.models.footer')
+      .map(entry => entry.options.id).sort(),
+    ['task-agent-shared-path', 'task-agent-source-path'],
+  );
 
   for (const entry of registered) {
     assert.equal(typeof entry.component, 'function', `${entry.options.name} must register a component`);

@@ -164,8 +164,26 @@ npm run sync-docs   # 同步所有 agent 的 Agent.md 资源清单
 - **级联补丁是对随发行包的猴子补丁**，不是依赖。**每次升级 DSH 都必须重新适配**（补丁脚本会校验基线哈希并拒绝在未知版本上盲打）。
 - 观察室的「工作中/空闲中」只在 shell 提供会话摘要时才是真实的；**无法判定时显示为空闲，绝不臆造状态**。
 - 可见文案目前是中文硬编码，**未接入客户端 locale 服务**。
-- 角色创建目前以「模型工具 + 手工建文件夹」为主；**没有 GUI 建角色按钮**。
 - 只做了源码部署的第三方应用项目（如 VoiceStudio / OpenMAIC）**不包含依赖安装**，需要时自行按其文档安装。
+- **记忆注入最多滞后 30 秒**：`systemPrompt.context({ text })` 是**同步**的，不能在组装时读文件，因此靠内存缓存，按 30 秒定时器刷新。
+
+## 九之二、改这个插件时必须遵守的三条硬规则（都是踩过的坑）
+
+> 这三条各自都**真实导致过 DSH 启动失败或界面异常**，改动 `index.js` / `client.js` 前请先读。
+
+**规则 1｜`apply()` 内绝不 await 会重建 Loader 的操作。**
+`settings.update()` → `configEditor.edit()` → `hmr.runExclusive()` → `ctx.loader.await()`，而启动期 Loader 正在等你的 `apply()` 返回 → **死锁到 100 秒超时**，应用停在启动页。写入必须延后到 Loader settle 之后（见 `publishAfterBoot`），并经 `outsideHmrTransaction`。
+
+**规则 2｜不得直读未在 `inject` 里声明的服务。**
+Cordis 下 `ctx.systemPrompt` 这种访问**本身就会抛** `cannot get property "systemPrompt" without inject`，`ctx.systemPrompt?.method` 这样的可选链**挡不住**。要么加进 `export const inject = [...]`，要么用可选访问 `ctx.get('systemPrompt')`（本插件对 `settings` / `hmr` / `systemPrompt` 一律如此）。
+
+**规则 3｜不要把 `--dsw-alias-brand-primary` 当按钮底色。**
+深色主题下这个 token **本身就是近白色**，按钮会变成白块。主按钮用 `--dsw-alias-button-primary-fill` + `--dsw-alias-label-primary-foreground` 这一对（照宿主 `dsh-client-ui-primitives/lib/Button.module.css`），次级按钮用 `transparent` + `--dsw-alias-border-l3`。
+
+**另外两条安装/调试经验**：
+
+- 插件**装到哪个 profile**取决于应用当前状态：应用降级到安全模式时，`plugin_manager` 会作用在 `desktop-safe-mode` 上，**修不到 `web`**。判断方法：日志路径里出现 `desktop-safe-mode`，或输出是 `link:` + `✓ Already up to date`（而非 `generation-install: promoted to …`）。
+- 测试桩是普通对象，读缺失属性只得到 `undefined`；**真实 Cordis 会抛**。所以"未声明服务直读"这类 bug 只有**把 `ctx.X` 定义成一读就抛的 getter**的测试才能拦住（见 `test/host-apply.test.mjs` 的「apply survives a service that throws on property access」）。
 
 ## 十、目录结构
 
@@ -185,6 +203,23 @@ dsh-task-agent-kit/
 └─ cordis.team.patch.yml 可选的 Agent Teams 启用层（须追加到 profile 补丁）
 ```
 
+## 十之二、随附角色池（`D:\DSH_desktop\Agents`）
+
+本插件随附的角色池实况（由 `npm run sync-docs` 扫描磁盘生成，含用于验证的 **`测试`** 角色）：
+
+| 角色 | 专属技能 | MCP | 应用项目 |
+|---|---:|---:|---:|
+| CAE | 0 | 1（abaqus） | 0 |
+| PPT制作 | 1 | 0 | 3 |
+| 子Agent举例 | 0 | 0 | 0 |
+| 新媒体视频 | 1 | 0 | 2 |
+| 日常使用 | 30 | 0 | 1 |
+| **测试** | 0 | 0 | 0 |
+| 科研论文 | 177 | 0 | 0 |
+| 编程开发 | 3 | 0 | 3 |
+
+共 **8 个角色**。`Agents\_templates` 不是角色（无角色标记），**会被扫描静默跳过**——与 `npm run check` 的输出一致。
+新增角色只需在建好文件夹后跑一次 `npm run sync-docs`，本表随各角色 `Agent.md` 的资源清单一起刷新。
 ## 十一、致谢与许可
 
 - 依赖 DSH 的 Cordis 插件体系；多层级派发能力建立在 `@deepseek-ai/dsh-experimental-agent-team` 之上。

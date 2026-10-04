@@ -1,90 +1,98 @@
 {
-  "name": "dsh-task-agent-kit",
-  "version": "0.1.0",
-  "type": "module",
-  "description": "Multi-tier task-Agent trees for DeepSeek Harness: every role folder under a source-agent path becomes a selectable Agent, a lead delegates down a 1-5 tier tree, and an Agent observer room shows and enters any tier's own conversation.",
-  "meta": {
-    "title": "Task Agent Kit",
-    "description": "Turns each role folder under the configured source-agent path into a selectable Agent: its Agent.md becomes the session persona, its .skills/ is mounted, its MCP servers are connected, and shared resource roots reach every role. Adds the tier picker, the Agent observer room and a role-scaffolding tool."
-  },
-  "icon": "./icon.svg",
-  "license": "MIT",
-  "author": "ZDH4869",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/ZDH4869/dsh-task-agent-kit.git"
-  },
-  "bugs": {
-    "url": "https://github.com/ZDH4869/dsh-task-agent-kit/issues"
-  },
-  "homepage": "https://github.com/ZDH4869/dsh-task-agent-kit#readme",
-  "keywords": [
-    "dsh",
-    "deepseek-harness",
-    "cordis",
-    "agent",
-    "multi-agent",
-    "agent-teams",
-    "subagent"
-  ],
-  "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./package.json": "./package.json",
-    "./locale/*.json": "./locale/*.json"
-  },
-  "files": [
-    "index.js",
-    "client.js",
-    "preset-base.json",
-    "src/**/*.js",
-    "tools/**/*.mjs",
-    "install/**",
-    "patches/**",
-    "cordis.patch.yml",
-    "cordis.team.patch.yml",
-    "icon.svg",
-    "locale/*.json",
-    "README.md",
-    "AGENT-INSTALL.md",
-    "LICENSE"
-  ],
-  "scripts": {
-    "test": "node --test test/registry.test.mjs test/host-apply.test.mjs test/client-contract.test.mjs test/client-runtime.test.mjs test/client-render.test.mjs test/role-scaffold.test.mjs",
-    "check": "node tools/e2e-check.mjs",
-    "dry-run": "node tools/dry-run.mjs",
-    "sync-docs": "node tools/sync-agent-docs.mjs"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-client-runtime": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-host-webserver": ">=0.2.0-rc.1",
-    "react": "^18.2.0"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-client-runtime": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-slots": { "optional": true },
-    "@deepseek-ai/dsh-host-webserver": { "optional": true },
-    "react": { "optional": true }
-  },
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true,
-      "inject": [
-        "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-settings-models",
-        "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-workspace"
-      ]
-    }
-  }
+    "name":  "dsh-task-agent-kit",
+    "version":  "0.1.0",
+    "type":  "module",
+    "description":  "Multi-tier task-Agent trees for DeepSeek Harness: every role folder under a source-agent path becomes a selectable Agent, a lead delegates down a 1-5 tier tree, and an Agent observer room shows and enters any tier\u0027s own conversation.",
+    "meta":  {
+                 "title":  "Task Agent Kit",
+                 "description":  "Turns each role folder under the configured source-agent path into a selectable Agent: its Agent.md becomes the session persona, its .skills/ is mounted, its MCP servers are connected, and shared resource roots reach every role. Adds the tier picker, the Agent observer room and a role-scaffolding tool."
+             },
+    "icon":  "./icon.svg",
+    "license":  "MIT",
+    "author":  "ZDH4869",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/ZDH4869/dsh-task-agent-kit.git"
+                   },
+    "bugs":  {
+                 "url":  "https://github.com/ZDH4869/dsh-task-agent-kit/issues"
+             },
+    "homepage":  "https://github.com/ZDH4869/dsh-task-agent-kit#readme",
+    "keywords":  [
+                     "dsh",
+                     "deepseek-harness",
+                     "cordis",
+                     "agent",
+                     "multi-agent",
+                     "agent-teams",
+                     "subagent"
+                 ],
+    "exports":  {
+                    ".":  "./index.js",
+                    "./client":  "./client.js",
+                    "./package.json":  "./package.json",
+                    "./locale/*.json":  "./locale/*.json"
+                },
+    "files":  [
+                  "index.js",
+                  "client.js",
+                  "preset-base.json",
+                  "src/**/*.js",
+                  "tools/**/*.mjs",
+                  "install/**",
+                  "patches/**",
+                  "cordis.patch.yml",
+                  "cordis.team.patch.yml",
+                  "icon.svg",
+                  "locale/*.json",
+                  "README.md",
+                  "AGENT-INSTALL.md",
+                  "LICENSE"
+              ],
+    "scripts":  {
+                    "test":  "node --test test/client-contract.test.mjs test/client-render.test.mjs test/client-runtime.test.mjs test/host-apply.test.mjs test/memory-cache.test.mjs test/permanent-page.test.mjs test/registry.test.mjs test/role-scaffold.test.mjs test/task-board.test.mjs test/task-registry.test.mjs test/task-tools.test.mjs",
+                    "check":  "node tools/e2e-check.mjs",
+                    "dry-run":  "node tools/dry-run.mjs",
+                    "sync-docs":  "node tools/sync-agent-docs.mjs"
+                },
+    "engines":  {
+                    "node":  "\u003e=20"
+                },
+    "peerDependencies":  {
+                             "@deepseek-ai/dsh-client-runtime":  "\u003e=0.2.0-rc.1",
+                             "@deepseek-ai/dsh-client-ui-slots":  "\u003e=0.2.0-rc.1",
+                             "@deepseek-ai/dsh-host-webserver":  "\u003e=0.2.0-rc.1",
+                             "react":  "^18.2.0"
+                         },
+    "peerDependenciesMeta":  {
+                                 "@deepseek-ai/dsh-client-runtime":  {
+                                                                         "optional":  true
+                                                                     },
+                                 "@deepseek-ai/dsh-client-ui-slots":  {
+                                                                          "optional":  true
+                                                                      },
+                                 "@deepseek-ai/dsh-host-webserver":  {
+                                                                         "optional":  true
+                                                                     },
+                                 "react":  {
+                                               "optional":  true
+                                           }
+                             },
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "platform":  "web",
+                               "immediately":  true,
+                               "inject":  [
+                                              "@deepseek-ai/dsh-api-remotes",
+                                              "@deepseek-ai/dsh-client-ui-conversation",
+                                              "@deepseek-ai/dsh-client-ui-layout",
+                                              "@deepseek-ai/dsh-client-ui-settings-models",
+                                              "@deepseek-ai/dsh-client-ui-sidebar",
+                                              "@deepseek-ai/dsh-client-ui-workspace"
+                                          ]
+                           }
+            }
 }

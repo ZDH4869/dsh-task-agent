@@ -119,6 +119,9 @@ cd $kit ; npm test
 # 4.2 角色池端到端
 node "$kit\tools\e2e-check.mjs"
 
+# 4.2b 期望值：应识别到 8 个角色（CAE / PPT制作 / 子Agent举例 / 新媒体视频 / 日常使用 / 测试 / 科研论文 / 编程开发），
+#       并跳过 _templates；数量不符时读 statusFile 的 failures 字段看原因
+
 # 4.3 运行日志有无激活失败
 Select-String -Path "$env:USERPROFILE\..\AppData\Roaming\dsh-desktop\logs\harness.log" -Pattern 'did not activate|plugin failures|compatibility warning' | Select-Object -Last 10
 
@@ -140,11 +143,15 @@ node "$app\resources\app.asar.unpacked\node_modules\@deepseek-ai\dsh\lib\bin.js"
 | 现象 | 处理 |
 |---|---|
 | 启动后进入 **安全模式**（`safe mode: third-party web profile bundles are blocked`） | 说明某插件让启动失败。**先停用最近装的插件**，把 `harness.log` 里 `did not activate` / `TypeError` 的原文报告给用户 |
+| 启动失败：`cannot get property "X" without inject` | **插件读了未在 `inject` 里声明的服务**。Cordis 下连"读属性"都会抛，`ctx.X?.method` 这种可选链**挡不住**。修法：把 `X` 加进 `export const inject = [...]`，或改用可选访问 `ctx.get('X')`。本插件对 `settings`/`hmr`/`systemPrompt` 一律走 `ctx.get` |
+| 启动失败：`plugin initialization timed out after 100s`，日志里 `[loader] still waiting for 1 plugin entries` | **插件在 `apply()` 里 await 了会重建 Loader 的写入**（典型是 `settings.update`）。`settings → configEditor → hmr.runExclusive → loader.await()` 而 Loader 正在等 `apply()` 返回 → 死锁。修法：把写入**延后到 `ctx.root.loader.await()` 之后**，并用 `hmr.runExclusive` 之外的事务作用域（见本插件 `publishAfterBoot` + `outsideHmrTransaction`） |
+| **`install_bundle` 装完没生效 / 装到了错的 profile** | 应用降级到安全模式时，`plugin_manager` 作用在 **`desktop-safe-mode`** profile 上（那里通常是指向源码的 SymbolicLink），**修不到 `web`**。安全模式的 profile 也用 `link:` 安装而不是代次快照，所以看到 `✓ Already up to date` + 日志路径里有 `desktop-safe-mode` 就说明装错地方了。处理：先让应用回到 `web`（必要时就地修补 `profiles\.generations\live\<代次>\node_modules\...` 的那份快照），回到 `web` 后再跑一次 `install_bundle` 生成干净代次 |
 | `slot entry crashed in '<slot>'` | 客户端半渲染抛错。把控制台原文报告给用户 |
 | 角色卡片为空 | 读 `statusFile`：`failures` 里会写明原因（常见：`Agent.md` 为空、`sourceAgentPath` 未配） |
 | `spawn_teammate` 不存在 | 第 3 步没做，或三个 `dsh-experimental-*` 包不存在 |
 | 第 3 层创建失败 `TEAM_LEAD_REQUIRED` | 级联补丁没打（见 3b） |
 | 设置行报"settings namespace … not offered" | 客户端读设置走的是 `configForms` 镜像；把该行文字报告给用户 |
+| 按钮在深色主题下是**白块** | 不要把 `--dsw-alias-brand-primary` 当按钮底色：深色主题下这个 token **本身就是近白色**。用 `--dsw-alias-button-primary-fill` + `--dsw-alias-label-primary-foreground` 这一对 |
 
 ---
 
@@ -170,3 +177,18 @@ node "$app\resources\app.asar.unpacked\node_modules\@deepseek-ai\dsh\lib\bin.js"
 
 **最后把结果如实回报**：哪些通过、哪些失败、失败项的**原文错误**，以及这台机器的 Harness 版本。
 不要替用户判断"应该没问题"。
+
+---
+
+## 7. 发布副本维护（**同步代码后必读**）
+
+本副本与开发副本（`D:\DSH_desktop\dsh-ext\task-agent-kit`）**唯一的必要差异是包名**：
+
+| | 包名 | `client.js` 的 `__ModuleLoader__` id |
+|---|---|---|
+| 开发副本 | `@local/dsh-task-agent-kit` | `@local/dsh-task-agent-kit` |
+| **本发布副本** | `dsh-task-agent-kit` | **`dsh-task-agent-kit`** |
+
+**客户端的 loader id 必须等于安装时的包名**，否则客户端半不挂载（`test/client-contract.test.mjs` 有两条断言专门守这个不变量）。
+
+**所以从开发副本同步 `client.js` 之后，务必把 id 改回 `dsh-task-agent-kit`，然后在本目录跑一次全量测试确认 110/110。**

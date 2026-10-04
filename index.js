@@ -11,11 +11,14 @@
  */
 
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, isAbsolute, basename } from 'node:path';
 
 import { scanSourceRoot, SKILL_DIR_CANDIDATES, ROLE_PROMPT_CANDIDATES, MCP_FILE_CANDIDATES } from './src/source-agent-registry.js';
 import { composeRolePreset } from './src/role-preset.js';
 import { createRoleSkeleton, ROLE_FOLDERS } from './src/role-scaffold.js';
+import { createTaskTools } from './src/task-tools.js';
+import { listExpertTasks } from './src/task-registry.js';
+import { buildMemoryCache } from './src/memory-cache.js';
 
 export const name = 'task-agent-kit';
 
@@ -136,8 +139,41 @@ export const Config = z.object({
    * Their `.skills` directories are appended to EVERY role preset's `customSkillDirs` and
    * their `.mcp\mcp.json` servers are merged into every role preset, so a resource added
    * to a shared root becomes available to every agent without touching each role folder.
+   *
+   * Volatile for the same reason as `sourceAgentPath`: the Settings page reads and writes
+   * it through the settings document, and only a volatile field is offered there.
    */
-  sharedRoots: z.array(z.string()).default([]),
+  sharedRoots: z.array(z.string()).default([]).volatile(),
+  /**
+   * expertId -> permanent-session id, stored as one JSON string so it travels the settings
+   * document unchanged. The Client's observer room writes it when it lazily creates an
+   * expert's permanent page, so the mapping survives restart and a cleared localStorage.
+   */
+  permanentPages: z.string().default('{}').volatile(),
+  /**
+   * presetId -> the role's own folder path, as one JSON string. The Host owns it (it is the
+   * side that scans the folders) and writes it back so the Client can put an expert's
+   * permanent page into a Workspace rooted at that expert's own folder.
+   */
+  expertFolders: z.string().default('{}').volatile(),
+  /**
+   * presetId -> that expert's latest task history, as one JSON string:
+   * `[{ name, tier, status, deliverable, updatedAt }]`. The Client cannot read the task
+   * files itself, so the Host publishes them for the observer room's history view.
+   */
+  expertTasks: z.string().default('{}').volatile(),
+  /**
+   * The Client's "create one expert" request, as JSON: `{ requestId, name, description, tier,
+   * mountShared }`. This plugin exposes no `@Remote`, so the Settings document is the only
+   * client-to-Host channel; the request and its outcome both live here, which makes the
+   * exchange auditable and replayable.
+   */
+  roleRequest: z.string().default('').volatile(),
+  /**
+   * The outcome of `roleRequest`, as JSON: `{ requestId, status, presetId?, rolePath?, error? }`.
+   * The Client waits for the id it sent before finishing the flow.
+   */
+  roleRequestResult: z.string().default('').volatile(),
 });
 
 /** Row ids must stay unique inside a preset, so fold any character that is not safe. */
@@ -181,6 +217,16 @@ const TEMPLATE_URL = new URL('./preset-base.json', import.meta.url);
 export async function apply(ctx, config = {}) {
   const prefix = config.presetIdPrefix ?? 'taskagent';
   const registered = new Map();
+  // Client "create an expert" requests already acted on, so a settings edit re-running the
+  // handler cannot create the same folder twice.
+  const roleRequestsSeen = new Set();
+  /**
+   * sessionId -> the memory block injected for that task session.
+   *
+   * `systemPrompt.context({ text })` is SYNCHRONOUS and runs before every model step, so it
+   * cannot read files: the cache is filled off the assembly path and the hook is a Map get.
+   */
+  const memoryCache = new Map();
 
   const presetIdFor = role => `${prefix}-${role.presetId.replace(new RegExp(`^${prefix}-`), '')}`;
 
@@ -288,7 +334,11 @@ export async function apply(ctx, config = {}) {
       }
       let plugins;
       try {
-        ({ plugins } = composeRolePreset(base.plugins, { ...role, sharedSkillsDirs, sharedMcpServers }, promptText));
+        // A role that recorded `mountShared: false` in its agent.json keeps its own resources
+        // and receives none of the shared ones; every other role receives them all.
+        const roleSharedSkills = role.mountShared === false ? [] : sharedSkillsDirs;
+        const roleSharedMcp = role.mountShared === false ? [] : sharedMcpServers;
+        ({ plugins } = composeRolePreset(base.plugins, { ...role, sharedSkillsDirs: roleSharedSkills, sharedMcpServers: roleSharedMcp }, promptText));
       } catch (error) {
         failures.push({ roleId: role.roleId, reason: `compose failed: ${error?.message ?? error}` });
         continue;
@@ -318,6 +368,20 @@ export async function apply(ctx, config = {}) {
       // `apply` with a fresh closure, so a registration whose disposer we no longer
       // hold would collide with itself and fail the whole role.
       if (preExisting.has(presetId)) {
+        // The preset exists but belongs to an earlier closure. It stays on the roster all
+        // the same: the status file and the published expert-folder map are derived from
+        // the roster, so dropping adopted roles here would empty both after a live reload.
+        roster.push({
+          roleId: role.roleId,
+          presetId,
+          rolePath: role.rolePath,
+          promptBytes: Buffer.byteLength(promptText, 'utf8'),
+          skillsDir: role.skillsDir,
+          mcpServers: (role.mcpServers ?? []).map(server => server.serverName),
+          rows: plugins.length,
+          warnings: role.diagnostics ?? [],
+          adopted: true,
+        });
         adopted.push({
           roleId: role.roleId,
           presetId,
@@ -418,6 +482,171 @@ export async function apply(ctx, config = {}) {
     return ids;
   }
 
+  /**
+   * Run a settings write outside any active HMR transaction.
+   *
+   * The settings service reconciles the Loader through `hmr.runExclusive`, and that
+   * service rejects a transaction started from inside another one. Writes issued from a
+   * `settings/document-updated` handler — or from a deferred boot publication — would
+   * otherwise be rejected as nested. The HMR service exposes its transaction scope
+   * (`executing`), so hand the write to `exit()` when it is there; a host without the
+   * full service (the desktop's config-watch fallback) has no transactions to nest in.
+   */
+  const outsideHmrTransaction = run => {
+    const hmr = typeof ctx.get === 'function' ? ctx.get('hmr') : undefined;
+    const exit = hmr?.executing?.exit;
+    return typeof exit === 'function' ? exit.call(hmr.executing, run) : run();
+  };
+
+  /** Write one field of this plugin's own settings namespace, tolerating a missing service. */
+  async function publishSettings(patch) {
+    try {
+      const settings = typeof ctx.get === 'function' ? ctx.get('settings') : undefined;
+      if (settings === undefined || typeof settings.update !== 'function') return false;
+      await outsideHmrTransaction(() => settings.update(ROW_ID, patch));
+      return true;
+    } catch (error) {
+      ctx.logger?.warn?.(`task-agent-kit: settings update failed: ${error?.message ?? error}`);
+      return false;
+    }
+  }
+
+  /**
+   * Answer one Client "create an expert" request.
+   *
+   * Idempotent by `requestId`: a settings edit re-runs this, and the same id is never acted on
+   * twice. A refusal (bad name, existing folder) comes back as a normal result rather than an
+   * exception, because the Client is waiting for an answer either way.
+   */
+  async function handleRoleRequest() {
+    const raw = readConfigValue(config.roleRequest, '');
+    if (typeof raw !== 'string' || raw.trim().length === 0) return;
+    let request;
+    try {
+      request = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const requestId = String(request?.requestId ?? '');
+    if (requestId.length === 0 || roleRequestsSeen.has(requestId)) return;
+    roleRequestsSeen.add(requestId);
+
+    const answer = async payload => {
+      const result = JSON.stringify({ requestId, ...payload });
+      if (result !== readConfigValue(config.roleRequestResult, '')) await publishSettings({ roleRequestResult: result });
+    };
+
+    try {
+      const root = sourcePath();
+      if (root.trim().length === 0) {
+        await answer({ status: 'error', error: '源 agent 路径未配置，请先在「设置 → 模型 → 源 agent 路径」保存路径。' });
+        return;
+      }
+      // The optional "source folder path" names the expert's OWN folder. Exactly two
+      // spellings are accepted, so the created location is never a guess:
+      //   - empty            → `<源 agent 路径>\<专家名>`
+      //   - ends with 专家名 → created AT that path
+      // Anything else is refused, because it would silently mean "a folder inside it".
+      const parent = String(request?.parentPath ?? '').trim().replace(/[\\/]+$/u, '');
+      if (parent.length > 0 && !isAbsolute(parent)) {
+        await answer({ status: 'error', error: `源文件夹路径必须是绝对路径：${parent}` });
+        return;
+      }
+      const expertName = String(request?.name ?? '').trim();
+      if (parent.length > 0 && basename(parent) !== expertName) {
+        await answer({
+          status: 'error',
+          error: `源文件夹路径必须以专家名结尾，或留空（留空=建在源 agent 路径下）。`
+            + `期望结尾 \\${expertName}，实际填的是 ${parent}`,
+        });
+        return;
+      }
+      const homeRoot = parent.length === 0 ? root : dirname(parent);
+      const created = await createRoleSkeleton({
+        rootPath: homeRoot,
+        roleName: request?.name,
+        tier: Number(request?.tier ?? 5),
+        description: String(request?.description ?? ''),
+        templateDir: String(readConfigValue(config.roleTemplateDir, '') ?? ''),
+        // Never overwrite: a duplicate name is refused and reported (the user's choice).
+        overwrite: false,
+        mountShared: request?.mountShared !== false,
+      });
+      // The new folder only becomes selectable after a re-scan; that scan also republishes
+      // `expertFolders`, which is how the Client learns the new preset's own folder.
+      await resync(`a new expert "${created.roleName}"`);
+      const entry = (state.roster ?? []).find(item => item.roleId === created.roleName);
+      await answer({
+        status: 'ok',
+        presetId: entry?.presetId ?? null,
+        rolePath: created.rolePath,
+        roleName: created.roleName,
+        templateWarning: created.templateWarning ?? null,
+      });
+    } catch (error) {
+      await answer({ status: 'error', error: String(error?.message ?? error) });
+    }
+  }
+
+  /**
+   * Publish presetId -> role folder to the settings document so the Client can create the
+   * expert's permanent page inside a Workspace rooted at the expert's own folder.
+   *
+   * Written only when the mapping actually changed: this plugin also listens for
+   * `settings/document-updated`, so an unconditional write would re-trigger its own rescan.
+   */
+  async function publishExpertFolders(result) {
+    try {
+      const settings = typeof ctx.get === 'function' ? ctx.get('settings') : undefined;
+      if (settings === undefined || typeof settings.update !== 'function') return;
+      const folders = {};
+      const tasks = {};
+      for (const entry of result?.roster ?? []) {
+        if (typeof entry.presetId !== 'string' || typeof entry.rolePath !== 'string') continue;
+        folders[entry.presetId] = entry.rolePath;
+        // The Client cannot read files, so each expert's task history is published here for
+        // the observer room's "expert × task × tier × status" view. Capped: the settings
+        // document is a mirror, not a database.
+        try {
+          const history = await listExpertTasks(entry.rolePath);
+          tasks[entry.presetId] = history.slice(0, 10).map(task => ({
+            name: task.taskName,
+            tier: task.tier,
+            status: task.acceptance?.status ?? 'pending',
+            deliverable: task.deliverable ?? null,
+            updatedAt: task.updatedAt ?? null,
+          }));
+        } catch {
+          tasks[entry.presetId] = [];
+        }
+      }
+      const nextFolders = JSON.stringify(folders);
+      const nextTasks = JSON.stringify(tasks);
+      // One write for both fields: an extra round trip would re-enter the same Loader
+      // reconciliation for no benefit.
+      const patch = {};
+      if (nextFolders !== readConfigValue(config.expertFolders, '{}')) patch.expertFolders = nextFolders;
+      if (nextTasks !== readConfigValue(config.expertTasks, '{}')) patch.expertTasks = nextTasks;
+      if (Object.keys(patch).length === 0) return;
+      await outsideHmrTransaction(() => settings.update(ROW_ID, patch));
+    } catch (error) {
+      ctx.logger?.warn?.(`task-agent-kit: publishing expert folders failed: ${error?.message ?? error}`);
+    }
+  }
+
+  /** Refresh the injected-memory cache from disk. Never throws into a caller's path. */
+  async function refreshMemoryCache() {
+    try {
+      const built = await buildMemoryCache(state.roster ?? []);
+      memoryCache.clear();
+      for (const [sessionId, block] of built) memoryCache.set(sessionId, block);
+      return built.size;
+    } catch (error) {
+      ctx.logger?.warn?.(`task-agent-kit: memory cache refresh failed: ${error?.message ?? error}`);
+      return 0;
+    }
+  }
+
   /** Re-scan after a live settings edit; failures are reported, never thrown. */
   async function resync(reason) {
     const path = sourcePath();
@@ -438,12 +667,26 @@ export async function apply(ctx, config = {}) {
       ctx.logger?.warn?.(`task-agent-kit: re-scan failed: ${state.lastError}`);
     }
     await writeStatus();
+    await publishExpertFolders(state);
+    await refreshMemoryCache();
   }
 
-  if (sourcePath().trim().length === 0) {
-    state.failures = [{ roleId: '(none)', reason: 'sourceAgentPath is not configured' }];
-    ctx.logger?.info?.('task-agent-kit: sourceAgentPath is not configured; no role preset registered');
-  } else {
+  // The initial scan reads every role folder (`Agent.md`, `.skills`, `.mcp`, `open_project`) and
+  // composes one preset per role. On a large source path that is real filesystem work, and during
+  // boot the Loader is waiting for THIS apply() to settle — awaiting it here delayed activation
+  // and showed up as "[loader] still waiting for 1 plugin entries after Ns" naming this plugin
+  // alone, long after every shipped plugin was ready.
+  //
+  // Nothing registered before it needs it: tool execution resolves `sourcePath()` per call, the
+  // injection hook only reads the memory cache, and the Client reads the published folder map.
+  // So the scan runs once the Loader tree has settled, and activation becomes near-instant.
+  const initialScan = async () => {
+    if (sourcePath().trim().length === 0) {
+      state.failures = [{ roleId: '(none)', reason: 'sourceAgentPath is not configured' }];
+      ctx.logger?.info?.('task-agent-kit: sourceAgentPath is not configured; no role preset registered');
+      await writeStatus();
+      return;
+    }
     try {
       const result = await sync(sourcePath());
       Object.assign(state, result);
@@ -451,7 +694,7 @@ export async function apply(ctx, config = {}) {
       // The harness log bridge records warnings and errors only: a successful run would
       // otherwise leave no trace, so the outcome is reported at warning level when it
       // needs attention and persisted through `statusFile` in every case.
-      const summary = `task-agent-kit: registered ${result.roster.length} role preset(s) from "${sourcePath()}" (base "${result.base}", ${result.baseRows} rows)`
+      const summary = `task-agent-kit: registered ${result.roster.length - result.adopted.length} role preset(s) from "${sourcePath()}" (base "${result.base}", ${result.baseRows} rows)`
         + (result.adopted.length > 0 ? `; reused ${result.adopted.length} already-registered preset(s)` : '')
         + (result.skipped.length > 0 ? `; skipped ${result.skipped.length} folder(s)` : '')
         + (result.failures.length > 0 ? `; ${result.failures.length} role(s) failed` : '');
@@ -469,17 +712,73 @@ export async function apply(ctx, config = {}) {
       state.failures = [{ roleId: '(scan)', reason: state.lastError }];
       ctx.logger?.warn?.(`task-agent-kit: initial scan failed: ${state.lastError}`);
     }
+    await writeStatus();
+  };
+
+  // A settings write is reconciled through the Loader and awaits the whole entry tree,
+  // but during boot the Loader is still waiting for THIS apply() to settle: awaiting
+  // the write here deadlocks until the Loader times the entry out and fails the boot.
+  // Defer the expert-folder publication — and any pending Client "create an expert"
+  // request, which writes settings too — until the Loader tree has settled.
+  const publishAfterBoot = async () => {
+    try {
+      await handleRoleRequest();
+    } catch (error) {
+      ctx.logger?.warn?.(`task-agent-kit: deferred role request failed: ${error?.message ?? error}`);
+    }
+    await initialScan();
+    await publishExpertFolders(state);
+    await refreshMemoryCache();
+  };
+  if (typeof ctx.root?.loader?.await === 'function') {
+    void ctx.root.loader.await().then(publishAfterBoot, publishAfterBoot);
+  } else {
+    // No Loader above this context (plain test host): a macrotask still moves the write
+    // out of the apply frame that a Loader would be waiting on.
+    setTimeout(() => { void publishAfterBoot(); }, 0);
   }
-  await writeStatus();
 
   // Live settings edits do not remount this plugin (the field is volatile), so the
   // registration is refreshed from the settings event instead of from a restart.
   if (typeof ctx.on === 'function') {
     ctx.effect(() => ctx.on('settings/document-updated', ns => {
       if (ns !== ROW_ID) return;
-      void resync('a settings change');
+      // A Client "create an expert" request arrives the same way; handle it before the scan
+      // so the new folder is picked up by the rescan it triggers itself.
+      void handleRoleRequest().then(() => resync('a settings change'));
     }));
   }
+
+  // Inject this task's newest memories before every model step.
+  //
+  // `systemPrompt` is reached through `ctx.get` on purpose: Cordis THROWS when a plugin reads
+  // a property whose service is not in its `inject` list ("cannot get property
+  // \"systemPrompt\" without inject"), and that hard dependency failed the entire boot. An
+  // optional lookup just skips the injection when the service is absent.
+  const systemPrompt = typeof ctx.get === 'function' ? ctx.get('systemPrompt') : undefined;
+  if (typeof systemPrompt?.context === 'function') {
+    ctx.effect(() => systemPrompt.context({
+      name: 'task-agent:expert-memory',
+      // Runtime contexts are ordered 110 (sandbox), 115 (approval), 120 (subagent delegation):
+      // 130 puts the task's own state after all of them.
+      order: 130,
+      text: assemble => {
+        const agent = assemble?.agent;
+        const scope = assemble?.scope;
+        const sessionId = typeof agent?.id === 'string' ? agent.id : (typeof scope?.id === 'string' ? scope.id : undefined);
+        if (sessionId === undefined) return '';
+        return memoryCache.get(sessionId) ?? '';
+      },
+    }));
+  }
+
+  // Memories are written while a task runs, so the cache is refreshed on a timer as well as
+  // on every scan. `unref` keeps a short-lived host (a test runner) from being held open.
+  ctx.effect(() => {
+    const timer = setInterval(() => { void refreshMemoryCache(); }, 30_000);
+    if (typeof timer?.unref === 'function') timer.unref();
+    return () => clearInterval(timer);
+  });
 
   // Role scaffolding as a model-facing tool: creating a role is the one part of the
   // flow that cannot be expressed by choosing an existing folder.
@@ -540,6 +839,20 @@ export async function apply(ctx, config = {}) {
         }
       },
     })));
+
+    // The task-record tools: what a delegated expert uses to register its part in a task,
+    // deliver, be accepted, and keep its own context memory for that task. Each writes
+    // inside that expert's own `log\` folder, so the record stays readable without the plugin.
+    for (const definition of createTaskTools({
+      sourcePath,
+      defineTool,
+      // The upstream team board is looked up lazily and optionally: this plugin does not
+      // inject `agentTeams`, so reading that property directly would throw ("cannot get
+      // property \"agentTeams\" without inject") and fail the whole boot.
+      getTeamBoard: () => (typeof ctx.get === 'function' ? ctx.get('agentTeams') : undefined),
+    })) {
+      ctx.effect(() => ctx.tools.register(definition));
+    }
   }
 
   ctx.effect(() => () => disposeAll());
